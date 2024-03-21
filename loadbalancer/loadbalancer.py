@@ -326,16 +326,122 @@ def remove():
     # TODO: code
     content = request.get_json(force=True)
     n = content['n']
-    hostnames = content['hostnames']
+    hostnames = content['servers']
     if len(hostnames) > n:
-        message = '<ERROR> Number of hostnames is greater than n'
+        message = '<ERROR> Length of server list is more than removable instances'
         return jsonify({'message': message, 'status': 'failure'}), 400
+    
+    # Sanity check
+    for hostname in hostnames:
+        if hostname not in replicas:
+            message = '<ERROR> Hostname does not exist'
+            return jsonify({'message': message, 'status': 'failure'}), 400
+        
+    # Sanity check
+    if n > len(replicas):
+        message = '<ERROR> n is more than number of servers available'
+        return jsonify({'message': message, 'status': 'failure'}), 400
+    
+    # First delete the named replicas
+    # remove the docker container, remove the server from the hashring, remove the server from the replicas list, and remove the server from the MapT table
+    replica_lock.acquire()
+    new_replicas = []
+    # for hostname in hostnames:
+    for replica in replicas:
+        if replica[0] in hostnames:
+            hostname = replica[0]
+            os.system(f'docker stop {replica[1]} && docker rm {replica[1]}')
+            
+            replicas.remove(replica)
+            mydb = mysql.connector.connect(
+                host="db",
+                user="username",
+                password="password",
+                database="loadbalancer"
+            )
+            # Find the shard IDs that the server is responsible for
+            shard_ids = []
+            mycursor = mydb.cursor()
+            mycursor.execute(f"SELECT Shard_id FROM MapT WHERE Server_id = {replica[1][7:]}")
+            shard_ids = mycursor.fetchall()
+            # Remove the server from the MapT table
+            mycursor.execute(f"DELETE FROM MapT WHERE Server_id = {replica[1][7:]}")
+            mydb.commit()
+            mycursor.close()
+            mydb.close()
+
+            # Remove the server from hashrings of the shards
+            for shard in shard_ids:
+                shard_to_hrlock[shard].acquire()
+                shard_to_hr[shard].remove_server(replica[1])
+                shard_to_hrlock[shard].release()
+
+            n -= 1
+        else:
+            new_replicas.append(replica)
+
+    replicas = new_replicas
+    
+
+
+    # Then delete the unnamed replicas
+    replicas_tobedeleted = replicas.copy()
+    replica_lock.release()
+
+    random.shuffle(replicas_tobedeleted)
+    while len(replicas_tobedeleted) > n:
+        replicas_tobedeleted.pop()
+
+    replica_lock.acquire()
+    for replica in replicas_tobedeleted:
+        os.system(f'docker stop {replica[1]} && docker rm {replica[1]}')
+        mydb = mysql.connector.connect(
+            host="db",
+            user="username",
+            password="password",
+            database="loadbalancer"
+        )
+        # Find the shard IDs that the server is responsible for
+        shard_ids = []
+        mycursor = mydb.cursor()
+        mycursor.execute(f"SELECT Shard_id FROM MapT WHERE Server_id = {replica[1][7:]}")
+        shard_ids = mycursor.fetchall()
+        # Remove the server from the MapT table
+        mycursor.execute(f"DELETE FROM MapT WHERE Server_id = {replica[1][7:]}")
+        mydb.commit()
+        mycursor.close()
+        mydb.close()
+
+        # Remove the server from hashrings of the shards
+        for shard in shard_ids:
+            shard_to_hrlock[shard].acquire()
+            shard_to_hr[shard].remove_server(replica[1])
+            shard_to_hrlock[shard].release()
+
+    new_replicas = []
+    for replica in replicas:
+        if replica not in replicas_tobedeleted:
+            new_replicas.append(replica)
+    replicas = new_replicas
+
+    replica_lock.release()
+    deleted_replica_names = [replica[0] for replica in replicas_tobedeleted]
+    deleted_replica_names += hostnames
+
+    message = {
+        'N': len(replicas),
+        'servers': deleted_replica_names
+    }
+
+    return jsonify({'message': message, 'status': 'successful'}), 200
+    
+
     
 '''
 (/read, method=POST):
 '''
 def read():
-
+    # TODO: code
 
 
 '''
