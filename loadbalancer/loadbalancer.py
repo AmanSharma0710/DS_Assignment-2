@@ -440,8 +440,59 @@ def remove():
 '''
 (/read, method=POST):
 '''
+@app.route('/read', methods=['POST'])
 def read():
     # TODO: code
+    content = request.get_json(force=True)
+    stud_id_low = content['Stud_id']['low']
+    stud_id_high = content['Stud_id']['high']
+
+    # Find the shards that contain the data
+    mydb = mysql.connector.connect(
+        host="db",
+        user="username",
+        password="password",
+        database="loadbalancer"
+    )
+    mycursor = mydb.cursor()
+    mycursor.execute(f"SELECT Shard_id FROM ShardT WHERE Stud_id_low <= {stud_id_high} AND Stud_id_low + Shard_size > {stud_id_low}")
+    shards_list = mycursor.fetchall()
+    mycursor.close()
+    mydb.close()
+
+    # For each shard, find a server using the hashring and forward the request to the server
+    data = {}
+    for shard in shards_list:
+        shard_to_hrlock[shard].acquire()
+        server = shard_to_hr[shard].get_server(random.randint(0, 999999))
+        shard_to_hrlock[shard].release()
+        if server != None:
+            try:
+                reply = requests.post(f'http://{server}:{serverport}/read', json = {
+                    "shard": shard,
+                    "Stud_id": {"low": stud_id_low, "high": stud_id_high}
+                })
+                data[shard] = reply.json()
+            except requests.exceptions.ConnectionError:
+                message = '<ERROR> Server unavailable'
+                data[shard] = {'message': message, 'status': 'failure'}
+        else:
+            message = '<ERROR> Server unavailable'
+            data[shard] = {'message': message, 'status': 'failure'}
+
+    # merge the responses from the shards
+    merged_data = []
+    for shard in data:
+        if data[shard]['status'] == 'success':
+            merged_data += data[shard]['data']
+
+    response = {
+        "shards_queried": shards_list,
+        "data": merged_data,
+        "status": "success"
+    }
+    return jsonify(response), 200
+
 
 
 '''
