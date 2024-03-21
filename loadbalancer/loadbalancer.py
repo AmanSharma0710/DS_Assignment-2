@@ -15,22 +15,24 @@ from hashring import HashRing
 
 app = Flask(__name__)
 CORS(app)
-lock = threading.Lock()
-hrlock = threading.Lock()
+replica_lock = threading.Lock() # Lock for the replicas list
+shard_to_hr = {} # This dictionary will map the shard_id to hashring. key: shard_id, value: (hashring)
+shard_to_hrlock = {} # Lock for the shard_to_hr dictionary
 
 '''
 This function is called when a new server is added to the load balancer. It creates a new container with the server image and adds it to the hashring.
 '''
 def add_servers(n, shard_mapping, mycursor):
-    global num_servers
+    # global num_servers
     global replicas
 
     hostnames = []
-    for server in shard_mapping:
+    for server, shards_list in shard_mapping:
+        # append only the server name to the hostnames list
         hostnames.append(server)
     
     replica_names = []
-    lock.acquire()
+    replica_lock.acquire()
     for replica in replica_names:
         replica_names.append(replica[0])
 
@@ -45,7 +47,6 @@ def add_servers(n, shard_mapping, mycursor):
                     break
         elif hostnames[i] not in replica_names:
             replica_names.append(hostnames[i])
-    hrlock.acquire()
     # Spawn the containers from the load balancer
     for i in range(n):
         container_name = "Server_"
@@ -62,11 +63,12 @@ def add_servers(n, shard_mapping, mycursor):
         container_name += str(serverid)
         container = os.popen(f'docker run --name {container_name} --network mynet --network-alias {container_name} -e SERVER_ID={serverid} -d serverim:latest').read()
         if len(container) != 0:
-            hr.add_server(container_name)
             replicas.append([hostnames[i], container_name])
             # Configure the server with the shards
             shards_list = shard_mapping[hostnames[i]]
             shards_list = json.dumps(shards_list)
+            # sort the shards list to avoid deadlocks when later shard locks are acquired
+            shards_list = sorted(shards_list)
             try:
                 reply = requests.post(f'http://{container_name}:{serverport}/config', 
                                       json = {
@@ -74,23 +76,23 @@ def add_servers(n, shard_mapping, mycursor):
                                             "shards": shards_list
                                       })
             except requests.exceptions.ConnectionError:
-                lock.release()
-                hrlock.release()
+                replica_lock.release()
                 return jsonify({'message': 'Server configuration failed', 'status': 'failure'}), 400
             if reply.status_code != 200:
-                lock.release()
-                hrlock.release()
+                replica_lock.release()
                 return jsonify({'message': 'Server configuration failed', 'status': 'failure'}), 400
             for shard in shards_list:
                 mycursor.execute(f"INSERT INTO MapT (Shard_id, Server_id) VALUES ({shard}, {serverid})")
+                # Add the server to the hashring
+                shard_to_hrlock[shard].acquire()
+                shard_to_hr[shard].add_server(container_name)
+                shard_to_hrlock[shard].release()
 
         else:
-            lock.release()
-            hrlock.release()
+            replica_lock.release()
             return jsonify({'message': 'Server creation failed', 'status': 'failure'}), 400 
-    lock.release()
-    hrlock.release()
-    num_servers += n
+    replica_lock.release()
+    # num_servers += n
     return jsonify({'message': 'Servers spawned and configured', 'status': 'success'}), 200
     
 '''
@@ -120,22 +122,22 @@ def init():
     global studT_schema
     studT_schema = content['schema'] # Schema of the database
     shards = content['shards'] # Shards with Stud_id_low, Shard_id, Shard_size
-    servers = content['servers'] # Servers with Shard_id
+    shard_mapping = content['servers'] # Servers with Shard_id
 
-    global num_servers
-    num_servers = n
+    # global num_servers
+    # num_servers = n
 
     # Sanity check
-    if len(servers) != n:
+    if len(shard_mapping) != n:
         message = '<ERROR> Number of servers does not match the number of servers provided'
         return jsonify({'message': message, 'status': 'failure'}), 400
     
     # Sanity check
-    for server in servers:
-        if len(servers[server]) == 0:
+    for server, shards_list in shard_mapping:
+        if len(shards_list) == 0:
             message = '<ERROR> No shards assigned to server'
             return jsonify({'message': message, 'status': 'failure'}), 400
-    
+        
     # Sanity check
     for shard in shards:
         if shard['Stud_id_low'] < 0:
@@ -173,7 +175,12 @@ def init():
         # TODO: valid_idx
         mycursor.execute(f"INSERT INTO ShardT (Stud_id_low, Shard_id, Shard_size, valid_idx) VALUES ({shard['Stud_id_low']}, {shard['Shard_id']}, {shard['Shard_size']}, 0)")
     
-    response = add_servers(n, servers, mycursor)
+    # Create locks and HashRing objects for each shard
+    for shard in shards:
+        shard_to_hrlock[shard['Shard_id']] = threading.Lock()
+        shard_to_hr[shard['Shard_id']] = HashRing(hashtype = "sha256")
+
+    response = add_servers(n, shard_mapping, mycursor)
     if response[1] != 200:
         return response
         
@@ -230,8 +237,12 @@ def status():
     
     servers = {}
     for server in servers_dict:
-        servers["Server"+str(server)] = servers_dict[server]
-    
+        # Here convert the internal server names to external server names
+        for replica in replicas:
+            if replica[1] == f'Server_{server}':
+                servers[replica[0]] = servers_dict[server]
+                break
+
     mycursor.close()
     mydb.close()
     return jsonify({'N': len(servers), 'schema': studT_schema, 'shards': shards_list, 'servers': servers}), 200
@@ -258,16 +269,16 @@ def add():
     content = request.get_json(force=True)
     n = content['n']
     new_shards = content['new_shards']
-    servers = content['servers']
+    shard_mapping = content['servers']
 
     # Sanity check
-    if len(servers) != n:
+    if len(shard_mapping) != n:
         message = '<ERROR> Number of servers does not match the number of servers provided'
         return jsonify({'message': message, 'status': 'failure'}), 400
     
     # Sanity check
-    for server in servers:
-        if len(servers[server]) == 0:
+    for server in shard_mapping:
+        if len(shard_mapping[server]) == 0:
             message = '<ERROR> No shards assigned to server'
             return jsonify({'message': message, 'status': 'failure'}), 400
     
@@ -292,7 +303,11 @@ def add():
     for shard in new_shards:
         mycursor.execute(f"INSERT INTO ShardT (Stud_id_low, Shard_id, Shard_size, valid_idx) VALUES ({shard['Stud_id_low']}, {shard['Shard_id']}, {shard['Shard_size']}, 0)")
     
-    response = add_servers(n, servers, mycursor)
+    for shard in new_shards:
+        shard_to_hrlock[shard['Shard_id']] = threading.Lock()
+        shard_to_hr[shard['Shard_id']] = HashRing(hashtype = "sha256")
+
+    response = add_servers(n, shard_mapping, mycursor)
     if response[1] != 200:
         return response
     
@@ -300,8 +315,8 @@ def add():
     mycursor.close()
     mydb.close()
 
-    message = f'Add Servers: {", ".join(servers.keys())}'
-    return jsonify({'N': num_servers, 'message': message, 'status': 'successful'}), 200
+    message = f'Add Servers: {", ".join(shard_mapping.keys())}'
+    return jsonify({'N': len(replicas), 'message': message, 'status': 'successful'}), 200
 
 '''
 (/rm,method=DELETE): 
@@ -320,7 +335,7 @@ def remove():
 (/read, method=POST):
 '''
 def read():
-    
+
 
 
 '''
@@ -353,7 +368,7 @@ def manage_replicas():
     Entrypoint for thread that checks the replicas for heartbeats every 10 seconds.
     '''
     while True:
-        lock.acquire()
+        replica_lock.acquire()
         for replica in replicas:
             serverdown = False
             try:
@@ -384,7 +399,7 @@ def manage_replicas():
                     hr.remove_server(replica[1])
                     hr.add_server(replica[1])
                 hrlock.release()
-        lock.release()
+        replica_lock.release()
         # Sleep for 10 seconds
         time.sleep(10)
     
