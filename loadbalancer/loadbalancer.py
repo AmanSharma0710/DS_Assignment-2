@@ -18,6 +18,8 @@ CORS(app)
 replica_lock = threading.Lock() # Lock for the replicas list
 shard_to_hr = {} # This dictionary will map the shard_id to hashring. key: shard_id, value: (hashring)
 shard_to_hrlock = {} # Lock for the shard_to_hr dictionary
+shardid_to_idx = {} # This dictionary will map the shard_id to the index in the shards list
+shardid_to_idxlock = {} # Locks for the shardid_to_idx dictionary
 
 '''
 This function is called when a new server is added to the load balancer. It creates a new container with the server image and adds it to the hashring.
@@ -302,10 +304,14 @@ def add():
     # Insert the shards into the ShardT table
     for shard in new_shards:
         mycursor.execute(f"INSERT INTO ShardT (Stud_id_low, Shard_id, Shard_size, valid_idx) VALUES ({shard['Stud_id_low']}, {shard['Shard_id']}, {shard['Shard_size']}, 0)")
+
     
     for shard in new_shards:
         shard_to_hrlock[shard['Shard_id']] = threading.Lock()
         shard_to_hr[shard['Shard_id']] = HashRing(hashtype = "sha256")
+        shardid_to_idx[shard['Shard_id']] = 0
+        shardid_to_idxlock[shard['Shard_id']] = threading.Lock()
+
 
     response = add_servers(n, shard_mapping, mycursor)
     if response[1] != 200:
@@ -493,6 +499,160 @@ def read():
     }
     return jsonify(response), 200
 
+'''
+(/write, method=POST):
+'''
+
+@app.route('/write', methods=['POST'])
+def write():
+    content = request.get_json(force=True)
+    data = content['data']
+
+    # Sort the data by Stud_id
+    data = sorted(data, key = lambda x: x['Stud_id'])
+
+    mydb = mysql.connector.connect(
+        host = "db",
+        user = "username",
+        password = "password",
+        database = "loadbalancer"
+    )
+
+    mycursor = mydb.cursor()
+    mycursor.execute("SELECT * FROM ShardT")
+    shards = mycursor.fetchall()
+
+    data_idx = 0
+
+    for shard in shards:
+        data_to_insert = []
+        while data_idx < len(data) and data[data_idx]['Stud_id'] < shard[0] + shard[2]:
+            data_to_insert.append(data[data_idx])
+            data_idx += 1
+        
+        if len(data_to_insert) > 0:
+            shard_to_hrlock[shard[1]].acquire()
+            server = shard_to_hr[shard[1]].get_server(random.randint(0, 999999))
+            shard_to_hrlock[shard[1]].release()
+            if server != None:
+                try:
+                    shardid_to_idxlock[shard[1]].acquire()
+                    shard_idx = shardid_to_idx[shard[1]]
+
+                    reply = requests.post(f'http://{server}:{serverport}/write', json = {
+                        "shard": shard[1],
+                        "curr_idx": shard_idx,
+                        "data": data_to_insert
+                    })
+
+                    if reply.status_code == 200:
+                        shardid_to_idx[shard[1]] = reply.json()['curr_idx']
+                    shardid_to_idxlock[shard[1]].release()
+                    
+                except requests.exceptions.ConnectionError:
+                    message = '<ERROR> Server unavailable'
+                    return jsonify({'message': message, 'status': 'failure'}), 400
+            else:
+                message = '<ERROR> Server unavailable'
+                return jsonify({'message': message, 'status': 'failure'}), 400
+
+    mydb.commit()
+    mycursor.close()
+    mydb.close()
+
+    response ={
+        "message": f"{len(data)} Data entries added",
+        "status": "success"
+    }
+
+    return jsonify(response), 200
+
+'''
+(/update, method=PUT):
+'''
+@app.route('/update', methods=['PUT'])
+def update():
+    content = request.get_json(force=True)
+    stud_id = content['Stud_id']
+    new_data = content['data']
+
+    # Find the shard that contains the data
+    mydb = mysql.connector.connect(
+        host="db",
+        user="username",
+        password="password",
+        database="loadbalancer"
+    )
+    mycursor = mydb.cursor()
+    mycursor.execute(f"SELECT Shard_id FROM ShardT WHERE Stud_id_low <= {stud_id} AND Stud_id_low + Shard_size > {stud_id}")
+    shard = mycursor.fetchone()
+    mycursor.close()
+    mydb.close()
+
+    # Find a server using the hashring and forward the request to the server
+    shard_to_hrlock[shard].acquire()
+    server = shard_to_hr[shard].get_server(random.randint(0, 999999))
+    shard_to_hrlock[shard].release()
+    if server != None:
+        try:
+            reply = requests.put(f'http://{server}:{serverport}/update', json = {
+                "shard": shard,
+                "Stud_id": stud_id,
+                "data": new_data
+            })
+            return reply.json(), reply.status_code
+        except requests.exceptions.ConnectionError:
+            message = '<ERROR> Server unavailable'
+            return jsonify({'message': message, 'status': 'failure'}), 400
+    else:
+        message = '<ERROR> Server unavailable'
+        return jsonify({'message': message, 'status': 'failure'}), 400
+    
+
+'''
+(/del, method=DELETE):
+'''
+
+@app.route('/del', methods=['DELETE'])
+def delete():
+    content = request.get_json(force=True)
+    Stud_id = content['Stud_id']
+
+    # Find the shard that contains the data
+    mydb = mysql.connector.connect(
+        host="db",
+        user="username",
+        password="password",
+        database="loadbalancer"
+    )
+
+    mycursor = mydb.cursor()
+    mycursor.execute(f"SELECT Shard_id FROM ShardT WHERE Stud_id_low <= {Stud_id} AND Stud_id_low + Shard_size > {Stud_id}")    
+    shard = mycursor.fetchone()
+    mycursor.close()
+    mydb.close()
+
+    # Find a server using the hashring and forward the request to the server
+    shard_to_hrlock[shard].acquire()
+    server = shard_to_hr[shard].get_server(random.randint(0, 999999))
+    shard_to_hrlock[shard].release()
+
+    if server != None:
+        try:
+            reply = requests.delete(f'http://{server}:{serverport}/del', json = {
+                "shard": shard,
+                "Stud_id": Stud_id
+            })
+            return reply.json(), reply.status_code
+        except requests.exceptions.ConnectionError:
+            message = '<ERROR> Server unavailable'
+            return jsonify({'message': message, 'status': 'failure'}), 400
+        
+    else:
+        message = '<ERROR> Server unavailable'
+        return jsonify({'message': message, 'status': 'failure'}), 400
+    
+    
 
 
 '''
