@@ -168,9 +168,9 @@ def init():
     mycursor.execute("CREATE DATABASE loadbalancer")
     mycursor.execute("USE loadbalancer")
 
-    # Create the table for the load balancer
-    mycursor.execute("CREATE TABLE ShardT (Stud_id_low INT PRIMARY KEY, Shard_id INT, Shard_size INT, valid_idx INT)")
-    mycursor.execute("CREATE TABLE MapT (Shard_id INT, Server_id INT)")
+    # Create the table for the load balancer with shard_id being string
+    mycursor.execute("CREATE TABLE ShardT (Stud_id_low INT PRIMARY KEY, Shard_id VARCHAR(255), Shard_size INT, valid_idx INT)")
+    mycursor.execute("CREATE TABLE MapT (Shard_id VARCHAR(255), Server_id INT)")
     
     # Insert the shards into the ShardT table
     for shard in shards:
@@ -329,7 +329,6 @@ def add():
 '''
 @app.route('/rm', methods=['DELETE'])
 def remove():
-    # TODO: code
     content = request.get_json(force=True)
     n = content['n']
     hostnames = content['servers']
@@ -387,8 +386,6 @@ def remove():
             new_replicas.append(replica)
 
     replicas = new_replicas
-    
-
 
     # Then delete the unnamed replicas
     replicas_tobedeleted = replicas.copy()
@@ -439,16 +436,13 @@ def remove():
         'servers': deleted_replica_names
     }
 
-    return jsonify({'message': message, 'status': 'successful'}), 200
-    
+    return jsonify({'message': message, 'status': 'successful'}), 200    
 
-    
 '''
 (/read, method=POST):
 '''
 @app.route('/read', methods=['POST'])
 def read():
-    # TODO: code
     content = request.get_json(force=True)
     stud_id_low = content['Stud_id']['low']
     stud_id_high = content['Stud_id']['high']
@@ -502,7 +496,6 @@ def read():
 '''
 (/write, method=POST):
 '''
-
 @app.route('/write', methods=['POST'])
 def write():
     content = request.get_json(force=True)
@@ -530,32 +523,42 @@ def write():
             data_to_insert.append(data[data_idx])
             data_idx += 1
         
-        if len(data_to_insert) > 0:
-            shard_to_hrlock[shard[1]].acquire()
-            server = shard_to_hr[shard[1]].get_server(random.randint(0, 999999))
-            shard_to_hrlock[shard[1]].release()
-            if server != None:
-                try:
-                    shardid_to_idxlock[shard[1]].acquire()
-                    shard_idx = shardid_to_idx[shard[1]]
+        if len(data_to_insert) == 0:
+            continue
+    
+        shard_to_hrlock[shard[1]].acquire()
+        # query all the servers having the shard
+        mycursor.execute(f"SELECT Server_id FROM MapT WHERE Shard_id = {shard[1]}")
+        servers = mycursor.fetchall()
 
-                    reply = requests.post(f'http://{server}:{serverport}/write', json = {
-                        "shard": shard[1],
-                        "curr_idx": shard_idx,
-                        "data": data_to_insert
-                    })
+        # if no servers are available, return error
+        if len(servers) == 0:
+            message = '<ERROR> No servers available for the shard'
+            return jsonify({'message': message, 'status': 'failure'}), 400
+        
+        for server in servers:
+            try:
+                shardid_to_idxlock[shard[1]].acquire()
+                shard_idx = shardid_to_idx[shard[1]]
 
-                    if reply.status_code == 200:
-                        shardid_to_idx[shard[1]] = reply.json()['curr_idx']
-                    shardid_to_idxlock[shard[1]].release()
-                    
-                except requests.exceptions.ConnectionError:
-                    message = '<ERROR> Server unavailable'
-                    return jsonify({'message': message, 'status': 'failure'}), 400
-            else:
+                reply = requests.post(f'http://{server}:{serverport}/write', json = {
+                    "shard": shard[1],
+                    "curr_idx": shard_idx,
+                    "data": data_to_insert
+                })
+
+                if reply.status_code == 200:
+                    shardid_to_idx[shard[1]] = reply.json()['curr_idx']
+                shardid_to_idxlock[shard[1]].release()
+                
+            except requests.exceptions.ConnectionError:
                 message = '<ERROR> Server unavailable'
                 return jsonify({'message': message, 'status': 'failure'}), 400
-
+            
+        # update the valid index of the shard
+        mycursor.execute(f"UPDATE ShardT SET valid_idx = {shardid_to_idx[shard[1]]} WHERE Shard_id = {shard[1]}")
+        shard_to_hrlock[shard[1]].release()
+    
     mydb.commit()
     mycursor.close()
     mydb.close()
@@ -586,14 +589,17 @@ def update():
     mycursor = mydb.cursor()
     mycursor.execute(f"SELECT Shard_id FROM ShardT WHERE Stud_id_low <= {stud_id} AND Stud_id_low + Shard_size > {stud_id}")
     shard = mycursor.fetchone()
-    mycursor.close()
-    mydb.close()
-
-    # Find a server using the hashring and forward the request to the server
+    
     shard_to_hrlock[shard].acquire()
-    server = shard_to_hr[shard].get_server(random.randint(0, 999999))
-    shard_to_hrlock[shard].release()
-    if server != None:
+    mycursor.execute(f"SELECT Server_id FROM MapT WHERE Shard_id = {shard}")
+    servers = mycursor.fetchall()
+
+    if len(servers) == 0:
+        message = '<ERROR> No servers available for the shard'
+        return jsonify({'message': message, 'status': 'failure'}), 400
+    
+    # update the entry in all servers
+    for server in servers:
         try:
             reply = requests.put(f'http://{server}:{serverport}/update', json = {
                 "shard": shard,
@@ -604,10 +610,13 @@ def update():
         except requests.exceptions.ConnectionError:
             message = '<ERROR> Server unavailable'
             return jsonify({'message': message, 'status': 'failure'}), 400
-    else:
-        message = '<ERROR> Server unavailable'
-        return jsonify({'message': message, 'status': 'failure'}), 400
     
+    shard_to_hrlock[shard].release()
+    # entry updated in all servers
+    mycursor.close()
+    mydb.close()
+    message = f"Data entry for Stud_id:{stud_id} updated"
+    return jsonify({'message': message, 'status':'success'}), 200
 
 '''
 (/del, method=DELETE):
@@ -629,15 +638,20 @@ def delete():
     mycursor = mydb.cursor()
     mycursor.execute(f"SELECT Shard_id FROM ShardT WHERE Stud_id_low <= {Stud_id} AND Stud_id_low + Shard_size > {Stud_id}")    
     shard = mycursor.fetchone()
-    mycursor.close()
-    mydb.close()
-
+    
     # Find a server using the hashring and forward the request to the server
     shard_to_hrlock[shard].acquire()
-    server = shard_to_hr[shard].get_server(random.randint(0, 999999))
-    shard_to_hrlock[shard].release()
+    
+    # find all the servers having the shard
+    mycursor.execute(f"SELECT Server_id FROM MapT WHERE Shard_id = {shard}")
+    servers = mycursor.fetchall()
 
-    if server != None:
+    if len(servers) == 0:
+        message = '<ERROR> No servers available for the shard'
+        return jsonify({'message': message, 'status': 'failure'}), 400
+    
+    # delete the entry in all servers
+    for server in servers:
         try:
             reply = requests.delete(f'http://{server}:{serverport}/del', json = {
                 "shard": shard,
@@ -647,38 +661,119 @@ def delete():
         except requests.exceptions.ConnectionError:
             message = '<ERROR> Server unavailable'
             return jsonify({'message': message, 'status': 'failure'}), 400
+
+    shard_to_hrlock[shard].release()
+    # entry deleted in all servers
+    mycursor.close()
+    mydb.close()
+    message = f"Data entry for Stud_id:{Stud_id} deleted"
+    return jsonify({'message': message, 'status':'success'}), 200
+            
+'''
+'''
+def respawn_server(replica):
+    # Replica is down
+    print(f'Replica {replica[1]} is down')
+    # Ensure that the replica container is stopped and removed
+    os.system(f'docker stop {replica[1]} && docker rm {replica[1]}')
+    # Replace the replica with a new replica
+    serverid = replica[1][7:]
+    # We use the same name instead of generating a new name to keep the naming consistent
+    os.system(f'docker run --name {replica[1]} --network mynet --network-alias {replica[1]} -e SERVER_ID={serverid} -d serverim:latest')
+    
+    # Connect to the database and fetch the list of shards that the server is responsible for
+    mydb = mysql.connector.connect(
+        host="db",
+        user="username",
+        password="password",
+        database="loadbalancer"
+    )
+    mycursor = mydb.cursor()
+    mycursor.execute(f"SELECT Shard_id FROM MapT WHERE Server_id = {serverid}")
+    shards = mycursor.fetchall()
+
+    # Remove the server from the hashrings of the shards
+    for shard in shards:
+        shard_to_hrlock[shard].acquire()
+        shard_to_hr[shard].remove_server(replica[1])
+        shard_to_hrlock[shard].release()
+    
+    # Remove the server from the MapT table until the server is added back
+    mycursor.execute(f"DELETE FROM MapT WHERE Server_id = {serverid}")
+    mydb.commit()
+
+    # Now reconstruct the server with the shards
+    shards_list = []
+    for shard in shards:
+        shards_list.append(shard[0])
+    
+    shards_list = json.dumps(shards_list)
+    try:
+        reply = requests.post(f'http://{replica[1]}:{serverport}/config', 
+                                json = {
+                                    "schema": studT_schema,
+                                    "shards": shards_list
+                                })
+        if reply.status_code != 200:
+            replica_lock.release()
+            return jsonify({'message': 'Server configuration failed', 'status': 'failure'}), 400
+    except requests.exceptions.ConnectionError:
+        replica_lock.release()
+        return jsonify({'message': 'Server configuration failed', 'status': 'failure'}), 400
+    
+    # first we will complete the data replication to the new server
+    for shard in shards:
+        shard_to_hrlock[shard].acquire()
+        mycursor.execute(f"SELECT * FROM ShardT WHERE Shard_id = {shard}")
+        shard_info = mycursor.fetchone()
+        server = shard_to_hr[shard].get_server(random.randint(0, 999999))
         
-    else:
-        message = '<ERROR> Server unavailable'
-        return jsonify({'message': message, 'status': 'failure'}), 400
-    
-    
-
-
-'''
-(/<path>,method=GET): This endpoint is the main endpoint that forwards the request to the backend server.
-'''
-@app.route('/<path>', methods=['GET'])
-def forward_request(path):
-    # Generate a random 6 digit request ID and get hostname of a replica from the hashring
-    hrlock.acquire()
-    server = hr.get_server(random.randint(0, 999999))
-    hrlock.release()
-    if server != None:
-        # Forward the request and return the response
+        # read all the data for the shard in this server using shard_info
+        shard_data = []
         try:
-            reply = requests.get(f'http://{server}:{serverport}/{path}')
-            return reply.json(), reply.status_code
+            reply = requests.post(f'http://{server}:{serverport}/read', json = {
+                "shard": shard,
+                "Stud_id": {"low": shard_info[0], "high": shard_info[0] + shard_info[3]}
+            })
+            data = reply.json()
+            if data['status'] == 'success':
+                shard_data = data['data']
+            else:
+                print(f'Error reading data from server {server}')
+                return jsonify({'message': 'Data replication failed', 'status': 'failure'}), 400
         except requests.exceptions.ConnectionError:
-            # Replica is down
-            hrlock.acquire()
-            hr.remove_server(server)
-            hrlock.release()
             message = '<ERROR> Server unavailable'
             return jsonify({'message': message, 'status': 'failure'}), 400
-    else:
-        message = '<ERROR> Server unavailable'
-        return jsonify({'message': message, 'status': 'failure'}), 400
+        
+        if len(shard_data) == 0:
+            continue
+
+        # write the data to the new server
+        try:
+            reply = requests.post(f'http://{replica[1]}:{serverport}/write', json = {
+                "shard": shard,
+                "curr_idx": 0,
+                "data": shard_data
+            })
+            shard_to_hrlock[shard].release()
+            if reply.status_code != 200:
+                print(f'Error writing data to server {replica[1]}')
+                return jsonify({'message': 'Data replication failed', 'status': 'failure'}), 400
+        except requests.exceptions.ConnectionError:
+            shard_to_hrlock[shard].release()
+            message = '<ERROR> Server unavailable'
+            return jsonify({'message': message, 'status': 'failure'}), 400
+
+        # add the server in the HashRing of the shard
+        shard_to_hrlock[shard].acquire()
+        shard_to_hr[shard].add_server(replica[1])
+
+        # Add the server to the MapT table
+        mycursor.execute(f"INSERT INTO MapT (Shard_id, Server_id) VALUES ({shard}, {serverid})")
+        mydb.commit()
+        shard_to_hrlock[shard].release()
+
+
 
 def manage_replicas():
     '''
@@ -687,35 +782,13 @@ def manage_replicas():
     while True:
         replica_lock.acquire()
         for replica in replicas:
-            serverdown = False
             try:
                 reply = requests.get(f'http://{replica[1]}:{serverport}/heartbeat')
             except requests.exceptions.ConnectionError:
-                # Replica is down
-                print(f'Replica {replica[1]} is down')
-                # Ensure that the replica container is stopped and removed
-                os.system(f'docker stop {replica[1]} && docker rm {replica[1]}')
-                # Replace the replica with a new replica
-                serverid = replica[1][7:]
-                # We use the same name instead of generating a new name to keep the naming consistent
-                os.system(f'docker run --name {replica[1]} --network mynet --network-alias {replica[1]} -e SERVER_ID={serverid} -d serverim:latest')
-                hrlock.acquire()
-                hr.remove_server(replica[1])
-                hr.add_server(replica[1])
-                hrlock.release()
+                respawn_server(replica)
             else:
-                hrlock.acquire()
-                if reply.status_code != 200 or replica[1] not in hr.name_to_serverid.keys():
-                    # Replica is not heartbeating, so it is assumed to be down
-                    print(f'Replica {replica[1]} is not responding to heartbeat, killing it')
-                    # Ensure that the replica container is stopped and removed
-                    os.system(f'docker stop {replica[1]} && docker rm {replica[1]}')
-                    # Replace the replica with a new replica
-                    serverid = replica[1][7:]
-                    os.system(f'docker run --name {replica[1]} --network mynet --network-alias {replica[1]} -e SERVER_ID={serverid} -d serverim:latest')
-                    hr.remove_server(replica[1])
-                    hr.add_server(replica[1])
-                hrlock.release()
+                if reply.status_code != 200:
+                    respawn_server(replica)                
         replica_lock.release()
         # Sleep for 10 seconds
         time.sleep(10)
