@@ -1,0 +1,22 @@
+version: "3.9"
+
+networks:
+  mynet:
+    name: mynet
+
+services:
+  loadbalancer: 
+    build: 
+      context: ./
+      dockerfile: ./loadbalancer/Dockerfile
+    image: loadbalancerim
+    container_name: loadbalancer
+    ports:
+      - "5000:5000"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:z
+    privileged: true
+    networks:
+      mynet:
+        aliases:  
+          - loadbalancer
