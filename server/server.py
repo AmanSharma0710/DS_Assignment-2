@@ -7,7 +7,7 @@ app = Flask(__name__)
 CORS(app)
 
 # For testing purposes, you can set the server ID as an environment variable while running the container instance of the server.
-os.environ['SERVER_ID'] = '1231'
+# os.environ['SERVER_ID'] = '1231'
 
 # Connect to the MySQL database
 mydb = mysql.connector.connect(
