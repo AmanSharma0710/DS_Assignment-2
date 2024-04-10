@@ -119,7 +119,8 @@ Sample response:
 '''
 @app.route('/init', methods=['POST'])
 def init():
-    content = request.get_json(force=True)
+    content = request.json
+    print(content)
     n = content['N'] # Number of servers
     global studT_schema
     studT_schema = content['schema'] # Schema of the database
@@ -135,7 +136,7 @@ def init():
         return jsonify({'message': message, 'status': 'failure'}), 400
     
     # Sanity check
-    for server, shards_list in shard_mapping:
+    for server, shards_list in shard_mapping.items():
         if len(shards_list) == 0:
             message = '<ERROR> No shards assigned to server'
             return jsonify({'message': message, 'status': 'failure'}), 400
@@ -148,13 +149,12 @@ def init():
         if shard['Shard_size'] <= 0:
             message = '<ERROR> Shard_size cannot be non-positive'
             return jsonify({'message': message, 'status': 'failure'}), 400
-    
+    print('here')
     # Initialising the database
     mydb = mysql.connector.connect(
-        host="db",
-        user="username",
-        password="password",
-    )
+    host="localhost", 
+    user="root",
+    password="abc")
     mycursor = mydb.cursor()
     # first check if the database exists
     # if it exists return error
@@ -209,11 +209,10 @@ Sample Response =
 @app.route('/status', methods=['GET'])
 def status():
     mydb = mysql.connector.connect(
-        host="db",
-        user="username",
-        password="password",
-        database="loadbalancer"
-    )
+    host="localhost", 
+    user="root",
+    password="abc",
+    database="loadbalancer")
     mycursor = mydb.cursor()
 
     # Get the schema
@@ -268,7 +267,7 @@ Response Code = 200
 '''
 @app.route('/add', methods=['POST'])
 def add():
-    content = request.get_json(force=True)
+    content = request.json
     n = content['n']
     new_shards = content['new_shards']
     shard_mapping = content['servers']
@@ -294,9 +293,9 @@ def add():
             return jsonify({'message': message, 'status': 'failure'}), 400
     
     mydb = mysql.connector.connect(
-        host="db",
-        user="username",
-        password="password",
+        host="localhost", 
+        user="root",
+        password="abc",
         database="loadbalancer"
     )
     mycursor = mydb.cursor()
@@ -329,7 +328,7 @@ def add():
 '''
 @app.route('/rm', methods=['DELETE'])
 def remove():
-    content = request.get_json(force=True)
+    content = request.json
     n = content['n']
     hostnames = content['servers']
     if len(hostnames) > n:
@@ -359,9 +358,9 @@ def remove():
             
             replicas.remove(replica)
             mydb = mysql.connector.connect(
-                host="db",
-                user="username",
-                password="password",
+                host="localhost", 
+                user="root",
+                password="abc",
                 database="loadbalancer"
             )
             # Find the shard IDs that the server is responsible for
@@ -399,9 +398,9 @@ def remove():
     for replica in replicas_tobedeleted:
         os.system(f'docker stop {replica[1]} && docker rm {replica[1]}')
         mydb = mysql.connector.connect(
-            host="db",
-            user="username",
-            password="password",
+            host="localhost", 
+            user="root",
+            password="abc",
             database="loadbalancer"
         )
         # Find the shard IDs that the server is responsible for
@@ -443,16 +442,16 @@ def remove():
 '''
 @app.route('/read', methods=['POST'])
 def read():
-    content = request.get_json(force=True)
+    content = request.json
     stud_id_low = content['Stud_id']['low']
     stud_id_high = content['Stud_id']['high']
 
     # Find the shards that contain the data
     mydb = mysql.connector.connect(
-        host="db",
-        user="username",
-        password="password",
-        database="loadbalancer"
+    host="localhost", 
+    user="root",
+    password="abc",
+    database="loadbalancer"
     )
     mycursor = mydb.cursor()
     mycursor.execute(f"SELECT Shard_id FROM ShardT WHERE Stud_id_low <= {stud_id_high} AND Stud_id_low + Shard_size > {stud_id_low}")
@@ -498,16 +497,16 @@ def read():
 '''
 @app.route('/write', methods=['POST'])
 def write():
-    content = request.get_json(force=True)
+    content = request.json
     data = content['data']
 
     # Sort the data by Stud_id
     data = sorted(data, key = lambda x: x['Stud_id'])
 
     mydb = mysql.connector.connect(
-        host = "db",
-        user = "username",
-        password = "password",
+        host="localhost", 
+        user="root",
+        password="abc",
         database = "loadbalancer"
     )
 
@@ -575,15 +574,15 @@ def write():
 '''
 @app.route('/update', methods=['PUT'])
 def update():
-    content = request.get_json(force=True)
+    content = request.json
     stud_id = content['Stud_id']
     new_data = content['data']
 
     # Find the shard that contains the data
     mydb = mysql.connector.connect(
-        host="db",
-        user="username",
-        password="password",
+        host="localhost",
+        user="root",
+        password="abc",
         database="loadbalancer"
     )
     mycursor = mydb.cursor()
@@ -624,14 +623,14 @@ def update():
 
 @app.route('/del', methods=['DELETE'])
 def delete():
-    content = request.get_json(force=True)
+    content = request.json
     Stud_id = content['Stud_id']
 
     # Find the shard that contains the data
     mydb = mysql.connector.connect(
-        host="db",
-        user="username",
-        password="password",
+        host="localhost",
+        user="root",
+        password="abc",
         database="loadbalancer"
     )
 
@@ -683,9 +682,9 @@ def respawn_server(replica):
     
     # Connect to the database and fetch the list of shards that the server is responsible for
     mydb = mysql.connector.connect(
-        host="db",
-        user="username",
-        password="password",
+        host="localhost",
+        user="root",
+        password="abc",
         database="loadbalancer"
     )
     mycursor = mydb.cursor()

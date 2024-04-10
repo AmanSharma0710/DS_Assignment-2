@@ -153,5 +153,3 @@ We have written scripts to run the required tests on the code, and the results a
 2. **Test A-2: Increase Shard Replicas**: This test increments the number of servers from 2 to 7 and sends 10000 reads and writes to the load balancer. We report the decrease in write speed for 10000 writes and the increase in read speed for 10000 reads.
 3. **Test A-3: Increase Number of Servers and Shards**: We increase the number of servers to 10 by adding new servers and increase the number of shards to 6 with shard replicas set to 8. We then report the increase in write speed for 10000 writes and read speed for 10000 reads.
 4. **Test A-4: Endpoint Functionality Check**: We verify the correctness of all endpoints. We then drop a server container and observe the load balancer's behavior in spawning a new container and copying shard entries from other replicas.
-
-[A detailed report](analysis/Analysis.pdf) of the analysis can be found in the `analysis` folder.
