@@ -94,7 +94,7 @@ Response Json:
 },
 Response Code = 200
 '''
-@app.route('/copy', methods=['POST'])
+@app.route('/copy', methods=['GET'])
 def copy():
     data = request.json
     shards = data['shards']
@@ -179,7 +179,7 @@ Response Json:
 },
 Response Code = 200
 '''
-@app.route('/update', methods=['POST'])
+@app.route('/update', methods=['PUT'])
 def update():
     data = request.json
     shard = data['shard']
@@ -205,7 +205,7 @@ Response Json:
 },
 Response Code = 200
 '''
-@app.route('/delete', methods=['POST'])
+@app.route('/delete', methods=['DELETE'])
 def delete():
     data = request.json
     shard = data['shard']

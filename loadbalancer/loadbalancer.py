@@ -730,9 +730,8 @@ def respawn_server(replica):
         # read all the data for the shard in this server using shard_info
         shard_data = []
         try:
-            reply = requests.post(f'http://{server}:{serverport}/read', json = {
-                "shard": shard,
-                "Stud_id": {"low": shard_info[0], "high": shard_info[0] + shard_info[3]}
+            reply = requests.post(f'http://{server}:{serverport}/copy', json = {
+                "shards": shard,
             })
             data = reply.json()
             if data['status'] == 'success':
